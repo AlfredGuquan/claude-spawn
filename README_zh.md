@@ -1,6 +1,6 @@
 # claude-spawn
 
-将 Claude Code 会话 fork 或 spawn 到多个并行 iTerm2 pane——自动携带上下文，自带 git worktree 隔离。
+两个skills将 Claude Code 会话 fork 或 spawn 到多个并行 iTerm2 pane——自动携带上下文，自带 git worktree 隔离。
 
 <p align="center">
   <img src="assets/fork-demo.gif" alt="Fork 演示 — 3 个并行 pane" width="720">
