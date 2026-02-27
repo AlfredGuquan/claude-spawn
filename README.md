@@ -1,5 +1,7 @@
 # claude-spawn
 
+[中文版](README_zh.md)
+
 Fork and spawn Claude Code sessions into parallel iTerm2 panes — with full context and git worktree isolation.
 
 <p align="center">
