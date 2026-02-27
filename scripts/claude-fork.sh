@@ -38,39 +38,90 @@ else
   COUNT=1
 fi
 
-# --- Prune orphaned session symlinks from previous fork invocations ---
-# Symlinks (*.jsonl -> original session file) are created for the --resume
-# workaround below. They're only needed at Claude startup; safe to remove after.
+# --- Prune fork-time symlinks and recover orphaned worktree sessions ---
+# Phase 1: Remove fork-time symlinks (only needed at Claude startup).
+# Phase 2: Read manifest to find cleaned-up worktrees and symlink their
+#           session files into the main repo's project dir for --resume.
 # Runs on each invocation, like git-worktree-prune.
-prune_fork_symlinks() {
+prune_and_recover() {
   local projects_dir="$HOME/.claude/projects"
+  local manifest="$HOME/.claude/fork-manifest.jsonl"
   [ -d "$projects_dir" ] || return 0
 
-  local count=0
+  # Phase 1: Prune fork-time symlinks in worktree project directories.
+  # These live in dirs whose ZP name contains "-worktrees-" (from .claude/worktrees/).
+  # Recovery symlinks (Phase 2) live in main repo dirs and are left untouched.
+  local prune_count=0
   while IFS= read -r link; do
-    local target
+    local dir_name target
+    dir_name=$(basename "$(dirname "$link")")
     target=$(readlink "$link" 2>/dev/null)
-    # Only remove symlinks pointing into projects dir (our creation pattern)
-    if [[ "$target" == "$projects_dir"/* ]]; then
+    if [[ "$dir_name" == *-worktrees-* ]] && [[ "$target" == "$projects_dir"/* ]]; then
       rm -f "$link"
-      ((count++))
+      ((prune_count++))
     fi
   done < <(find "$projects_dir" -type l -name "*.jsonl" 2>/dev/null)
-
-  # Remove now-empty directories left behind
   find "$projects_dir" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
+  if [ "$prune_count" -gt 0 ]; then
+    echo "Pruned $prune_count fork-time symlink(s)" >&2
+  fi
 
-  if [ "$count" -gt 0 ]; then
-    echo "Pruned $count orphaned session symlink(s)" >&2
+  # Phase 2: Recover sessions from cleaned-up worktrees using manifest.
+  [ -f "$manifest" ] || return 0
+  local remaining="" recover_count=0
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    local wt_path main_zp wt_zp
+    wt_path=$(echo "$entry" | jq -r '.worktree_path')
+    main_zp=$(echo "$entry" | jq -r '.main_zp')
+    wt_zp=$(echo "$entry" | jq -r '.wt_zp')
+
+    if [ -d "$wt_path" ]; then
+      remaining="${remaining}${entry}"$'\n'
+      continue
+    fi
+
+    # Worktree gone: symlink its session files into main repo's project dir
+    local wt_project_dir="$projects_dir/$wt_zp"
+    local main_project_dir="$projects_dir/$main_zp"
+    if [ -d "$wt_project_dir" ]; then
+      mkdir -p "$main_project_dir"
+      for f in "$wt_project_dir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        local fname
+        fname=$(basename "$f")
+        if [ ! -e "$main_project_dir/$fname" ]; then
+          ln -sf "$f" "$main_project_dir/$fname"
+          ((recover_count++))
+        fi
+      done
+    fi
+  done < "$manifest"
+
+  # Rewrite manifest atomically (only active worktree entries remain)
+  local tmp_manifest="${manifest}.tmp.$$"
+  printf '%s' "$remaining" > "$tmp_manifest"
+  mv "$tmp_manifest" "$manifest"
+
+  if [ "$recover_count" -gt 0 ]; then
+    echo "Recovered $recover_count session(s) from cleaned-up worktrees" >&2
   fi
 }
 
 # --- Worktree isolation ---
+REPO_ROOT=""
 if [ -n "$NO_WORKTREE" ]; then
   USE_WORKTREE=""
 elif git -C "$CWD" rev-parse --git-dir &>/dev/null; then
   USE_WORKTREE=1
-  prune_fork_symlinks
+  # Resolve main repo root early (needed for session lookup fallback and worktree paths).
+  # --git-common-dir always returns the main repo's .git, even from inside a worktree.
+  GIT_COMMON_DIR=$(git -C "$CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  if [ -z "$GIT_COMMON_DIR" ]; then
+    GIT_COMMON_DIR=$(cd "$CWD" && realpath "$(git rev-parse --git-common-dir)")
+  fi
+  REPO_ROOT=$(dirname "$GIT_COMMON_DIR")
+  prune_and_recover
 else
   USE_WORKTREE=""
   echo "WARNING: $CWD is not a git repository, skipping worktree isolation" >&2
@@ -80,6 +131,16 @@ fi
 if [ -z "$FRESH_MODE" ]; then
   SESSION_ID=$(tail -r ~/.claude/history.jsonl | jq -r --arg cwd "$CWD" \
     'select(.project == $cwd) | .sessionId // empty' | head -1)
+
+  # Fallback: history.jsonl records project as main repo path, not worktree path.
+  # Look for session files directly in the CWD's project directory instead.
+  if [ -z "$SESSION_ID" ]; then
+    CWD_ZP=$(echo "$CWD" | sed 's/[^a-zA-Z0-9]/-/g')
+    SESSION_FILE=$(ls -t "$HOME/.claude/projects/${CWD_ZP}"/*.jsonl 2>/dev/null | head -1)
+    if [ -n "$SESSION_FILE" ]; then
+      SESSION_ID=$(basename "$SESSION_FILE" .jsonl)
+    fi
+  fi
 
   if [ -z "$SESSION_ID" ]; then
     echo "ERROR: no session found for $CWD" >&2
@@ -136,12 +197,16 @@ for i in $(seq 1 "$COUNT"); do
       SLUG="fork-${$}-${i}"
     fi
     CMD="$CMD --worktree ${SLUG}"
+
+    # REPO_ROOT already computed above (worktree isolation section)
+    WT_PATH="${REPO_ROOT}/.claude/worktrees/${SLUG}"
+    PANE_CWD="$REPO_ROOT"
+
+    ORIG_ZP=$(echo "$CWD" | sed 's/[^a-zA-Z0-9]/-/g')
+    WT_ZP=$(echo "$WT_PATH" | sed 's/[^a-zA-Z0-9]/-/g')
+
     if [ -z "$FRESH_MODE" ]; then
       # Pre-symlink session file for --resume compatibility
-      REPO_ROOT=$(git -C "$CWD" rev-parse --show-toplevel)
-      WT_PATH="${REPO_ROOT}/.claude/worktrees/${SLUG}"
-      ORIG_ZP=$(echo "$CWD" | sed 's/[^a-zA-Z0-9]/-/g')
-      WT_ZP=$(echo "$WT_PATH" | sed 's/[^a-zA-Z0-9]/-/g')
       ORIG_SESSION_FILE="$HOME/.claude/projects/${ORIG_ZP}/${SESSION_ID}.jsonl"
       if [ -f "$ORIG_SESSION_FILE" ]; then
         mkdir -p "$HOME/.claude/projects/${WT_ZP}"
@@ -150,6 +215,15 @@ for i in $(seq 1 "$COUNT"); do
         echo "WARNING: session file not found at ${ORIG_SESSION_FILE}, skipping symlink" >&2
       fi
     fi
+
+    # Record worktree mapping for session recovery after cleanup
+    MAIN_ZP=$(echo "$REPO_ROOT" | sed 's/[^a-zA-Z0-9]/-/g')
+    jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+           --arg sid "${SESSION_ID:-}" --arg slug "$SLUG" \
+           --arg repo "$REPO_ROOT" --arg wt "$WT_PATH" \
+           --arg mzp "$MAIN_ZP" --arg wzp "$WT_ZP" \
+      '{ts:$ts,parent_session_id:$sid,slug:$slug,main_repo:$repo,worktree_path:$wt,main_zp:$mzp,wt_zp:$wzp}' \
+      >> "$HOME/.claude/fork-manifest.jsonl"
   fi
 
   if [ -n "$TASK" ]; then
