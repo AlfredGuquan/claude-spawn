@@ -41,6 +41,9 @@ Examples:
   # → construct rich prompt from current context, then:
   bash ~/.claude/scripts/claude-fork.sh --fresh $PWD "wt:refactor-auth:<self-contained prompt with context>"
 
+  # /new in plan mode (research before implementing)
+  bash ~/.claude/scripts/claude-fork.sh --fresh --plan $PWD "wt:evaluate-auth:<self-contained prompt with context>"
+
   # /new without worktree isolation
   bash ~/.claude/scripts/claude-fork.sh --fresh --no-worktree $PWD "<prompt>"
 
