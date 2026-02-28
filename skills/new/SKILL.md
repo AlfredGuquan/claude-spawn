@@ -26,6 +26,12 @@ Worktree isolation is enabled by default when CWD is a git repository.
 For each task, generate a short descriptive slug and prepend wt:slug: to the prompt string.
 Non-git directories skip worktree and share the same CWD.
 
+However, when CWD is already inside a git worktree (check: `git rev-parse --git-dir`
+differs from `git rev-parse --git-common-dir`), default to `--no-worktree`. This starts
+the fresh session in the same worktree directory, preserving all existing file changes —
+typical when the previous session's context is full and the task needs to continue.
+If the user explicitly wants a separate worktree for a different direction, omit --no-worktree.
+
 Examples:
 
   # /new 3
@@ -37,5 +43,9 @@ Examples:
 
   # /new without worktree isolation
   bash ~/.claude/scripts/claude-fork.sh --fresh --no-worktree $PWD "<prompt>"
+
+  # /new from inside a worktree (continues in same directory by default)
+  # LLM detects worktree → auto-adds --no-worktree
+  bash ~/.claude/scripts/claude-fork.sh --fresh --no-worktree $PWD "<self-contained prompt>"
 
 Report pane count and summarize what each pane was tasked with.
