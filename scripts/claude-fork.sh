@@ -1,20 +1,26 @@
 #!/bin/bash
-# claude-fork.sh — Fork/launch Claude Code sessions in N new iTerm2 panes
+# claude-fork.sh — Fork/launch coding agent sessions in N new iTerm2 panes
 # with optional task assignment, plan mode, and worktree isolation.
+# Supports Claude Code (default), CodeX, and Gemini via engine prefixes (codex: / gemini:).
 # Dependencies: jq, osascript (macOS)
-# Usage: claude-fork.sh [--fresh] [--plan] [--no-worktree] [--count N] CWD [TASK...]
+# Usage: claude-fork.sh [--fresh] [--plan] [--no-worktree] [--dry-run] [--count N] CWD [TASK...]
+
+# Convert filesystem path to Claude Code project directory name (ZP = sanitized path)
+zp() { echo "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
 
 # --- Parse options ---
 PLAN_MODE=""
 EXPLICIT_COUNT=""
 FRESH_MODE=""
 NO_WORKTREE=""
+DRY_RUN=""
 while [[ "$1" == --* ]]; do
   case "$1" in
     --plan) PLAN_MODE=1; shift ;;
     --count) EXPLICIT_COUNT="$2"; shift 2 ;;
     --fresh) FRESH_MODE=1; shift ;;
     --no-worktree) NO_WORKTREE=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -135,8 +141,7 @@ if [ -z "$FRESH_MODE" ]; then
   # Fallback: history.jsonl records project as main repo path, not worktree path.
   # Look for session files directly in the CWD's project directory instead.
   if [ -z "$SESSION_ID" ]; then
-    CWD_ZP=$(echo "$CWD" | sed 's/[^a-zA-Z0-9]/-/g')
-    SESSION_FILE=$(ls -t "$HOME/.claude/projects/${CWD_ZP}"/*.jsonl 2>/dev/null | head -1)
+    SESSION_FILE=$(ls -t "$HOME/.claude/projects/$(zp "$CWD")"/*.jsonl 2>/dev/null | head -1)
     if [ -n "$SESSION_FILE" ]; then
       SESSION_ID=$(basename "$SESSION_FILE" .jsonl)
     fi
@@ -148,11 +153,25 @@ if [ -z "$FRESH_MODE" ]; then
   fi
 fi
 
+# --- Pre-compute fixed ZP values for worktree symlinks ---
+CWD_ZP=$(zp "$CWD")
+if [ -n "$REPO_ROOT" ]; then
+  MAIN_ZP=$(zp "$REPO_ROOT")
+fi
+
 # --- Generate temp launch scripts (avoids AppleScript string escaping) ---
 SCRIPT_FILES=()
 for i in $(seq 1 "$COUNT"); do
   SCRIPT_FILE="/tmp/claude-fork-${$}-${i}.sh"
   TASK="${TASKS[$((i-1))]}"
+
+  # Extract engine prefix (codex: or gemini:, default claude)
+  ENGINE="claude"
+  if [[ "$TASK" == codex:* ]]; then
+    ENGINE="codex"; TASK="${TASK#codex:}"
+  elif [[ "$TASK" == gemini:* ]]; then
+    ENGINE="gemini"; TASK="${TASK#gemini:}"
+  fi
 
   # Determine per-pane plan mode: global --plan or plan: prefix
   PANE_PLAN=""
@@ -171,19 +190,50 @@ for i in $(seq 1 "$COUNT"); do
     TASK="${_remainder#*:}"
   fi
 
-  # Build launch command with permission flags
-  if [ -n "$FRESH_MODE" ]; then
-    CMD="claude"
-  else
-    CMD="claude --resume ${SESSION_ID} --fork-session"
+  # Expand @file reference: read task content from file, then clean up
+  if [[ "$TASK" == @* ]]; then
+    TASK_FILE_REF="${TASK#@}"
+    if [ ! -f "$TASK_FILE_REF" ]; then
+      echo "ERROR: task file not found: $TASK_FILE_REF" >&2
+      exit 1
+    fi
+    TASK=$(cat "$TASK_FILE_REF")
+    rm -f "$TASK_FILE_REF"
   fi
-  if [ -n "$PANE_PLAN" ]; then
-    # Plan mode: allow read-only tools to avoid authorization prompts
-    CMD="$CMD --permission-mode plan --allowed-tools Read,Grep,Glob,WebFetch,WebSearch,Task,ToolSearch"
-  else
-    # Normal mode: bypass all permission checks
-    CMD="$CMD --dangerously-skip-permissions"
-  fi
+
+  RESOLVED_TASKS[$((i-1))]="$TASK"
+  RESOLVED_ENGINES[$((i-1))]="$ENGINE"
+
+  # Dry-run: only resolve tasks, skip all file I/O and side effects
+  [ -n "$DRY_RUN" ] && continue
+
+  # Build launch command based on engine
+  case "$ENGINE" in
+    claude)
+      if [ -n "$FRESH_MODE" ]; then
+        CMD="claude"
+      else
+        CMD="claude --resume ${SESSION_ID} --fork-session"
+      fi
+      if [ -n "$PANE_PLAN" ]; then
+        CMD="$CMD --permission-mode plan --allow-dangerously-skip-permissions --allowed-tools Read,Grep,Glob,WebFetch,WebSearch,Task,ToolSearch,Bash,Agent"
+      else
+        CMD="$CMD --dangerously-skip-permissions"
+      fi
+      ;;
+    codex)
+      CMD="codex"
+      [ -n "$PANE_PLAN" ] && CMD="$CMD --sandbox read-only"
+      ;;
+    gemini)
+      CMD="gemini"
+      if [ -n "$PANE_PLAN" ]; then
+        CMD="$CMD --approval-mode plan"
+      else
+        CMD="$CMD --approval-mode yolo"
+      fi
+      ;;
+  esac
 
   # Add worktree isolation via Claude's native --worktree flag.
   # Bug workaround: --worktree does process.chdir() before --resume looks up the
@@ -192,7 +242,10 @@ for i in $(seq 1 "$COUNT"); do
   # file into the worktree path's project dir so --resume finds it after chdir.
   # See: https://github.com/anthropics/claude-code/issues/5768
   PANE_CWD="$CWD"
-  if [ -n "$USE_WORKTREE" ]; then
+  if [ -n "$SLUG" ] && [ "$ENGINE" != "claude" ]; then
+    echo "WARNING: wt:$SLUG: ignored (worktree only supported for Claude)" >&2
+  fi
+  if [ -n "$USE_WORKTREE" ] && [ "$ENGINE" = "claude" ]; then
     if [ -z "$SLUG" ]; then
       SLUG="fork-${$}-${i}"
     fi
@@ -202,12 +255,11 @@ for i in $(seq 1 "$COUNT"); do
     WT_PATH="${REPO_ROOT}/.claude/worktrees/${SLUG}"
     PANE_CWD="$REPO_ROOT"
 
-    ORIG_ZP=$(echo "$CWD" | sed 's/[^a-zA-Z0-9]/-/g')
-    WT_ZP=$(echo "$WT_PATH" | sed 's/[^a-zA-Z0-9]/-/g')
+    WT_ZP=$(zp "$WT_PATH")
 
     if [ -z "$FRESH_MODE" ]; then
       # Pre-symlink session file for --resume compatibility
-      ORIG_SESSION_FILE="$HOME/.claude/projects/${ORIG_ZP}/${SESSION_ID}.jsonl"
+      ORIG_SESSION_FILE="$HOME/.claude/projects/${CWD_ZP}/${SESSION_ID}.jsonl"
       if [ -f "$ORIG_SESSION_FILE" ]; then
         mkdir -p "$HOME/.claude/projects/${WT_ZP}"
         ln -sf "$ORIG_SESSION_FILE" "$HOME/.claude/projects/${WT_ZP}/${SESSION_ID}.jsonl"
@@ -217,7 +269,6 @@ for i in $(seq 1 "$COUNT"); do
     fi
 
     # Record worktree mapping for session recovery after cleanup
-    MAIN_ZP=$(echo "$REPO_ROOT" | sed 's/[^a-zA-Z0-9]/-/g')
     jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
            --arg sid "${SESSION_ID:-}" --arg slug "$SLUG" \
            --arg repo "$REPO_ROOT" --arg wt "$WT_PATH" \
@@ -233,7 +284,11 @@ for i in $(seq 1 "$COUNT"); do
       echo "#!/bin/bash"
       echo "_task=\$(cat '${TASK_FILE}')"
       echo "rm -f '${TASK_FILE}' '${SCRIPT_FILE}'"
-      echo "cd '${PANE_CWD}' && exec ${CMD} -- \"\$_task\""
+      if [ "$ENGINE" = "claude" ]; then
+        echo "cd '${PANE_CWD}' && exec ${CMD} -- \"\$_task\""
+      else
+        echo "cd '${PANE_CWD}' && exec ${CMD} \"\$_task\""
+      fi
     } > "$SCRIPT_FILE"
   else
     {
@@ -246,6 +301,17 @@ for i in $(seq 1 "$COUNT"); do
   chmod +x "$SCRIPT_FILE"
   SCRIPT_FILES+=("$SCRIPT_FILE")
 done
+
+# --- Dry-run: print resolved tasks and exit ---
+if [ -n "$DRY_RUN" ]; then
+  echo "TASK_COUNT=$COUNT"
+  for i in $(seq 0 $((COUNT-1))); do
+    echo "TASK_$((i+1))_ENGINE=${RESOLVED_ENGINES[$i]}"
+    echo "TASK_$((i+1))_LENGTH=${#RESOLVED_TASKS[$i]}"
+    echo "TASK_$((i+1))_FIRST_LINE=$(echo "${RESOLVED_TASKS[$i]}" | head -1)"
+  done
+  exit 0
+fi
 
 # --- Build and execute AppleScript ---
 PANES=""

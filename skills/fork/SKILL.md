@@ -2,7 +2,7 @@
 name: fork
 description: "Fork current Claude Code session into N new iTerm2 panes with optional task assignment. Triggers: /fork"
 user-invocable: true
-allowed-tools: Bash
+allowed-tools: Bash,Write
 argument-hint: "[tasks or count]"
 ---
 
@@ -17,7 +17,12 @@ For each task, generate a short ASCII slug (lowercase, hyphenated, descriptive) 
 - Positional args after $PWD: each task becomes one pane, N = number of tasks
 - plan: prefix on individual task: that pane enters plan mode (stripped before sending)
 - wt:slug: prefix on individual task: set worktree name for that pane (stripped before sending)
-- Prefixes can combine: plan:wt:slug:task (plan: first, then wt:slug:)
+- @/path: file reference, script reads task content from file (use for multi-line prompts)
+- Prefixes can combine: plan:wt:slug:@/tmp/fork-task-N.txt (plan: first, then wt:slug:, then @file)
+- For multi-line or long task prompts (more than one sentence), write content to
+  /tmp/fork-task-N.txt using the Write tool first, then pass @/tmp/fork-task-N.txt
+  as the task argument. This prevents shell quoting issues.
+- Short single-line tasks can still be passed directly as arguments.
 - No tasks + no count: fork 1 blank pane
 
 Worktree isolation is enabled by default when CWD is a git repository.

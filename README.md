@@ -2,7 +2,7 @@
 
 [中文版](README_zh.md)
 
-Fork and spawn Claude Code sessions into parallel iTerm2 panes — with full context and git worktree isolation.
+Fork and spawn coding agent sessions into parallel iTerm2 panes — with full context and git worktree isolation. Supports Claude Code (default), OpenAI CodeX, and Google Gemini CLI.
 
 <p align="center">
   <img src="assets/fork-demo.gif" alt="Fork demo — 3 parallel panes" width="720">
@@ -20,7 +20,7 @@ claude-spawn removes that friction. `/new` distills your current context into a 
   <img src="assets/new-demo.gif" alt="New session demo" width="720">
 </p>
 
-`/new` launches a fresh Claude Code session carrying over the context that matters — without the baggage of a full conversation history.
+`/new` launches a fresh agent session carrying over the context that matters — without the baggage of a full conversation history.
 
 You describe what the new session should work on. Claude distills the relevant background, file paths, and constraints from your current conversation into a self-contained prompt, then opens a new iTerm2 pane and starts a clean session with that prompt. No manual handoff document. No copy-pasting between windows. No acting as translator between two AIs.
 
@@ -33,9 +33,16 @@ You describe what the new session should work on. Claude distills the relevant b
 
 # Spawn 3 blank sessions
 /new 3
+
+# Route to a different engine
+/new codex: implement the REST API
+/new gemini: build the dashboard UI
+
+# Mixed dispatch — different engines in one call
+/new write tests for auth, codex: implement the API, gemini: build the login page
 ```
 
-Each session gets its own git worktree by default, so parallel work never conflicts.
+Each Claude session gets its own git worktree by default, so parallel work never conflicts.
 
 ## `/fork` — Fork into Parallel Panes
 
@@ -57,19 +64,31 @@ This is useful for exploring multiple approaches in parallel: different implemen
 /fork implement plan A, plan: research plan B
 ```
 
+## Multi-Engine Support
+
+By default, tasks are routed to Claude Code. You can prefix tasks with `codex:` or `gemini:` to use OpenAI CodeX or Google Gemini CLI instead. Engine selection is per-task, so you can mix engines in a single `/new` call.
+
+| Engine | Prefix | Plan mode | Worktree |
+|--------|--------|-----------|----------|
+| Claude Code | *(default)* | `--permission-mode plan` | Yes |
+| OpenAI CodeX | `codex:` | `--sandbox read-only` | No |
+| Google Gemini | `gemini:` | `--approval-mode plan` | No |
+
 ## How It Works
 
 `/fork` uses `claude --resume --fork-session --worktree` to give each pane full conversation history in an isolated worktree. It includes a workaround for a [known Claude Code bug](https://github.com/anthropics/claude-code/issues/5768) where `--worktree` changes the working directory before `--resume` looks up the session file. The script pre-symlinks the session file to the worktree's project directory so the lookup succeeds.
 
 `/new` constructs self-contained prompts from your current context and launches clean sessions via `claude --fresh --worktree`. No session file tricks needed.
 
-Both skills use a shared bash script (`scripts/claude-fork.sh`) that handles iTerm2 pane creation via AppleScript, worktree setup, plan mode flags, and cleanup of orphaned symlinks.
+Both skills use a shared bash script (`scripts/claude-fork.sh`) that handles iTerm2 pane creation via AppleScript, worktree setup, plan mode flags, engine dispatch, and cleanup of orphaned symlinks.
 
 ## Requirements
 
 - macOS with iTerm2
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI
 - Git repository (for worktree isolation)
+- *(Optional)* [OpenAI CodeX](https://github.com/openai/codex) CLI for `codex:` engine
+- *(Optional)* [Google Gemini](https://github.com/google-gemini/gemini-cli) CLI for `gemini:` engine
 
 ## Install
 
