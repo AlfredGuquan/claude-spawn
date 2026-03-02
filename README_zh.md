@@ -80,6 +80,28 @@ claude-spawn 消除了这些摩擦。`/new` 把当前上下文提炼成一个自
 
 两个 skill 共用一个 bash 脚本（`scripts/claude-fork.sh`），负责 iTerm2 pane 创建（通过 AppleScript）、worktree 设置、plan mode 标志、引擎派发以及孤立 symlink 的清理。
 
+## 内存安全
+
+大量并行 pane 可能导致 iTerm2 占用极高内存（100+ GB），主要原因是 scrollback buffer 累积了 Claude Code 的大量输出。脚本内置了安全限制：
+
+- **单次 pane 数量上限**：默认每次 `/fork` 或 `/new` 最多创建 10 个 pane。通过 `CLAUDE_FORK_MAX_PANES=20` 覆盖。
+- **全局 pane 总数上限**：当已运行的 agent pane 加上新请求的数量超过 30 时拒绝启动。通过 `CLAUDE_FORK_MAX_TOTAL=50` 覆盖。
+- **强制绕过**：设置 `CLAUDE_FORK_FORCE=1` 跳过全局总数检查。
+
+### 推荐 iTerm2 设置
+
+为防止内存暴涨，请配置 iTerm2 的 scrollback 限制：
+
+1. **iTerm2 → Settings → Profiles → Terminal**
+2. 将 **Scrollback lines** 设为 **10,000**（而非无限）
+3. 取消勾选 **"Unlimited scrollback"**
+
+仅此一项设置通常可将每个 pane 的内存占用从 GB 级降到 MB 级。
+
+### 替代方案：tmux
+
+对于重度并行工作负载，可以考虑用 tmux 代替 iTerm2。tmux 处理 scrollback 更高效，不会将所有 pane 内容加载到 GUI 内存中。脚本目前通过 AppleScript 控制 iTerm2，tmux 支持在计划中。
+
 ## 环境要求
 
 - macOS + iTerm2

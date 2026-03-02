@@ -82,6 +82,28 @@ By default, tasks are routed to Claude Code. You can prefix tasks with `codex:` 
 
 Both skills use a shared bash script (`scripts/claude-fork.sh`) that handles iTerm2 pane creation via AppleScript, worktree setup, plan mode flags, engine dispatch, and cleanup of orphaned symlinks.
 
+## Memory Safety
+
+Running many parallel panes can cause iTerm2 to consume extreme amounts of memory (100+ GB), primarily due to scrollback buffers accumulating large volumes of Claude Code output. The script includes built-in guardrails:
+
+- **Per-invocation pane limit**: defaults to 10 panes per `/fork` or `/new` call. Override with `CLAUDE_FORK_MAX_PANES=20`.
+- **Global pane limit**: refuses to launch if total running agent panes would exceed 30. Override with `CLAUDE_FORK_MAX_TOTAL=50`.
+- **Force bypass**: set `CLAUDE_FORK_FORCE=1` to skip the global limit check.
+
+### Recommended iTerm2 Settings
+
+To prevent memory blowup, configure iTerm2 scrollback limits:
+
+1. **iTerm2 → Settings → Profiles → Terminal**
+2. Set **Scrollback lines** to **10,000** (instead of unlimited)
+3. Uncheck **"Unlimited scrollback"**
+
+This single change typically reduces per-pane memory from gigabytes to megabytes.
+
+### Alternative: tmux
+
+For heavy parallel workloads, consider using tmux instead of iTerm2. tmux handles scrollback more efficiently and doesn't load all pane content into GUI memory. The script currently targets iTerm2 via AppleScript, but tmux support is on the roadmap.
+
 ## Requirements
 
 - macOS with iTerm2
