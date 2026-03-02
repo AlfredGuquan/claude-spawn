@@ -44,6 +44,31 @@ else
   COUNT=1
 fi
 
+# --- Safety: pane count limit ---
+MAX_PANES="${CLAUDE_FORK_MAX_PANES:-10}"
+if [ "$COUNT" -gt "$MAX_PANES" ]; then
+  echo "ERROR: requested $COUNT panes exceeds limit of $MAX_PANES" >&2
+  echo "Set CLAUDE_FORK_MAX_PANES to override (e.g. export CLAUDE_FORK_MAX_PANES=20)" >&2
+  exit 1
+fi
+
+# --- Safety: existing pane count check ---
+# Count existing iTerm2 claude/codex/gemini panes to prevent runaway accumulation
+existing_agent_panes() {
+  pgrep -f 'claude.*--resume\|claude.*--dangerously\|codex\|gemini.*--approval-mode' 2>/dev/null | wc -l | tr -d ' '
+}
+EXISTING_PANES=$(existing_agent_panes)
+TOTAL_PANES=$((EXISTING_PANES + COUNT))
+MAX_TOTAL="${CLAUDE_FORK_MAX_TOTAL:-30}"
+if [ "$TOTAL_PANES" -gt "$MAX_TOTAL" ]; then
+  echo "WARNING: $EXISTING_PANES agent panes already running, adding $COUNT more would reach $TOTAL_PANES (limit: $MAX_TOTAL)" >&2
+  echo "Set CLAUDE_FORK_MAX_TOTAL to override, or close existing panes first." >&2
+  if [ -z "$CLAUDE_FORK_FORCE" ]; then
+    echo "Set CLAUDE_FORK_FORCE=1 to bypass this check." >&2
+    exit 1
+  fi
+fi
+
 # --- Prune fork-time symlinks and recover orphaned worktree sessions ---
 # Phase 1: Remove fork-time symlinks (only needed at Claude startup).
 # Phase 2: Read manifest to find cleaned-up worktrees and symlink their
