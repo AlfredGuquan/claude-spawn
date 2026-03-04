@@ -1,16 +1,18 @@
 ---
 name: new
-description: "Launch fresh agent sessions (Claude/CodeX/Gemini) in iTerm2 panes with context-rich prompts. Triggers: /new"
+description: "Launch fresh agent sessions (Claude/CodeX/Gemini) in tmux windows with context-rich prompts. Triggers: /new"
 user-invocable: true
 allowed-tools: Bash,Write
 argument-hint: "[tasks]"
 ---
 
+New launches fresh Claude Code sessions with no inherited conversation history.
+
 For each task, construct a **self-contained prompt** that a fresh agent session
 (with zero prior context) can execute independently. Include relevant background,
 key file paths, constraints, and acceptance criteria drawn from your current context.
-Also generate a short ASCII slug (lowercase, hyphenated, descriptive) for worktree naming
-(Claude tasks only).
+Also generate a short ASCII slug (lowercase, hyphenated, descriptive) for window naming
+(also used as worktree directory name in git repos; Claude tasks only).
 
 IMPORTANT: Always write prompts to temp files before calling the script. Use the Write
 tool to create /tmp/new-task-N.txt (N = 1-based task index), then pass @/tmp/new-task-N.txt
@@ -19,11 +21,19 @@ special characters. Do NOT pass prompt text directly as a command-line argument.
 
 Then call:
 
-  bash ~/.claude/scripts/claude-fork.sh --fresh [--plan] [--no-worktree] [--count N] $PWD ["wt:slug:@/tmp/new-task-1.txt"] ...
+  bash ~/.claude/scripts/claude-fork.sh --fresh [--session-name <name>] [--plan] [--watch] [--pane] [--no-worktree] [--count N] $PWD ["wt:slug:@/tmp/new-task-1.txt"] ...
 
+- --pane: create panes in current window instead of independent windows (override default window behavior)
+- --session-name <name>: create or reuse a named tmux session for the new windows.
+  Use when the new task is unrelated to the current tmux session's purpose.
+  Session name should be semantic, human-readable, and must NOT contain `.` or `:`.
+  The session is created detached — user switches via `Ctrl-b s`.
+  If the named session already exists, windows are added to it.
+  Note: --session-name and --pane are incompatible (--pane is ignored).
 - --plan, --count, plan: prefix work identically to /fork
+- --watch: enable status monitoring (see /fork skill for watcher pattern and send-to-pane usage)
 - --no-worktree: disable worktree isolation (enabled by default in git repos)
-- wt:slug: prefix on individual task: set worktree name for that pane (stripped before sending)
+- wt:slug: prefix on individual task: set window name and worktree name (stripped before sending)
 - @/path: file reference, script reads content from file (use for all prompts)
 - Prefixes can combine: plan:wt:slug:@/tmp/new-task-N.txt (plan: first, then wt:slug:, then @file)
 - No tasks + no count: launch 1 blank fresh session
@@ -38,9 +48,9 @@ Engine prefixes (codex: / gemini:):
 - Plan mode mapping: codex: uses --sandbox read-only, gemini: uses --approval-mode plan.
 - Mixed dispatch is supported: different tasks in one call can target different engines.
 
-Worktree isolation is enabled by default when CWD is a git repository.
-For each task, generate a short descriptive slug and prepend wt:slug: to the argument.
-Non-git directories skip worktree and share the same CWD.
+For each task, always prepend wt:slug: — the slug sets the window name in all cases, and
+additionally serves as the worktree directory name in git repos. Non-git directories or
+--no-worktree skip worktree creation but the slug still sets the window name.
 
 However, when CWD is already inside a git worktree (check: `git rev-parse --git-dir`
 differs from `git rev-parse --git-common-dir`), default to `--no-worktree`. This starts
@@ -65,16 +75,16 @@ Examples:
     "wt:task-a:@/tmp/new-task-1.txt" \
     "wt:task-b:@/tmp/new-task-2.txt"
 
-  # /new without worktree isolation
+  # /new without worktree isolation (slug still used for window naming)
   # Step 1: Write tool → /tmp/new-task-1.txt
   # Step 2:
-  bash ~/.claude/scripts/claude-fork.sh --fresh --no-worktree $PWD "@/tmp/new-task-1.txt"
+  bash ~/.claude/scripts/claude-fork.sh --fresh --no-worktree $PWD "wt:refactor-auth:@/tmp/new-task-1.txt"
 
   # /new from inside a worktree (continues in same directory by default)
   # LLM detects worktree → auto-adds --no-worktree
   # Step 1: Write tool → /tmp/new-task-1.txt
   # Step 2:
-  bash ~/.claude/scripts/claude-fork.sh --fresh --no-worktree $PWD "@/tmp/new-task-1.txt"
+  bash ~/.claude/scripts/claude-fork.sh --fresh --no-worktree $PWD "wt:continue-task:@/tmp/new-task-1.txt"
 
   # /new 派 CodeX 做后端 API
   # Step 1: Write tool → /tmp/new-task-1.txt
@@ -92,4 +102,33 @@ Examples:
   # /new CodeX with plan mode
   bash ~/.claude/scripts/claude-fork.sh --fresh $PWD "codex:plan:@/tmp/new-task-1.txt"
 
-Report pane count and summarize what each pane was tasked with (including which engine).
+  # /new with watch mode — delegate and wait for results
+  # Step 1: Write tool → /tmp/new-task-1.txt, /tmp/new-task-2.txt
+  # Step 2:
+  bash ~/.claude/scripts/claude-fork.sh --fresh --watch $PWD \
+    "wt:task-a:@/tmp/new-task-1.txt" \
+    "wt:task-b:@/tmp/new-task-2.txt"
+
+--fresh is always passed. Never use --resume or --fork-session.
+New sessions do not inherit conversation history.
+
+## Session Routing
+
+Decide whether the new task belongs in the current tmux session or a new one:
+- **Same session** (default): the task is related to the current session's purpose (e.g., a sub-task,
+  a different approach to the same problem). Omit --session-name.
+- **New session**: the task is a completely different initiative with no logical connection to the
+  current work. Use `--session-name <descriptive-name>`.
+
+When in doubt, default to same session. The user can always create a new session manually.
+
+## Hierarchical Window Naming
+
+Like /fork, the script auto-assigns hierarchical numbers. The slug from `wt:slug:` becomes the
+window name suffix: `{number}:{slug}`. All operations are tracked in `~/.claude/fork-tree.jsonl`.
+
+  # /new in a new tmux session (unrelated task)
+  bash ~/.claude/scripts/claude-fork.sh --fresh --session-name db-migration $PWD "wt:plan-schema:@/tmp/new-task-1.txt"
+
+Report pane count, window numbers, summarize what each pane was tasked with (including which engine),
+and child IDs when --watch is used.
