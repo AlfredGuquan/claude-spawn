@@ -141,34 +141,51 @@ opencode
 
 ### 4. PyAgent
 
-**架构模式：轻量级工具增强 Agent 框架**
+**架构模式：代码生成式工具调用 Agent 框架**
 
-PyAgent（acodercat/PyAgent）是一个较为简单的 Python Agent 框架，专注于工具增强的 LLM 交互。
+PyAgent（acodercat/PyAgent，现已演化为 `py-calling-agent` / CaveAgent）采用了一种独特的架构：**让 LLM 生成可执行 Python 代码来调用工具**，而非传统的 JSON Schema 工具调用协议。这是它最核心的创新。
 
 ```python
-from pyagent import Agent, Tool
+from py_calling_agent import CaveAgent, PythonRuntime, Function, Variable
 
-agent = Agent(
-    llm_provider="openai",
-    model="gpt-4",
-    tools=[search_tool, calculator_tool]
-)
+# 创建运行时并注入工具和变量
+runtime = PythonRuntime()
+runtime.inject(Function(search_web))       # 注入可调用函数
+runtime.inject(Variable("results", [], "Search results"))  # 注入持久变量
 
-response = agent.run("What is the population of Tokyo divided by 2?")
+agent = CaveAgent(runtime=runtime, model=OpenAIServerModel(...))
+
+# LLM 不会输出 JSON 工具调用，而是生成 Python 代码：
+# results = search_web("Tokyo population")
+# population = int(results[0]["value"])
+# answer = population / 2
+response = await agent.run("What is the population of Tokyo divided by 2?")
 ```
 
-**架构特点：**
-- **简单 ReAct 循环**：基于 Reasoning + Acting 模式的单 Agent 循环
-- **工具注册机制**：通过 Tool 基类或装饰器注册自定义工具
-- **多 LLM 支持**：通过 Provider 抽象层支持 OpenAI、Anthropic 等
-- **轻量级设计**：核心代码量小，依赖少，易于理解和修改
+**三层架构：**
+- **Runtime 层 (`PythonRuntime`)**：维护持久 Python 执行环境，管理 `Variable()`（真实 Python 对象）、`Function()`（可调用函数包装）、`Type()`（数据类 Schema 暴露），通过 AST 分析进行安全验证
+- **Agent 编排层 (`CaveAgent`)**：管理多轮对话，协调 LLM 代码生成 → AST 安全检查 → 沙箱执行 → 结果反馈的循环
+- **Skills 系统**：实现 Agent Skills 开放标准（agentskills.io），支持渐进式加载（启动时仅加载元数据 ~100 tokens，按需加载完整指令）
 
-**关键差异点：**
-- 项目规模小，社区活跃度有限
-- 无多 Agent 编排能力
-- 无流式输出支持
-- 无沙箱或安全机制
-- 适合学习和小规模应用
+**核心创新 —— 代码生成 vs JSON 工具调用：**
+
+| 维度 | PyAgent（代码生成） | 传统框架（JSON 工具调用） |
+|------|-------------------|----------------------|
+| 多步操作 | 一次代码生成可包含循环、条件、多次调用 | 需要多次 LLM 往返 |
+| 状态管理 | 真实 Python 对象在内存中持久存在 | 通常无状态或序列化 |
+| 表达能力 | 完整 Python 语法 | 受限于 JSON Schema |
+| 安全性 | AST 级别验证（ImportRule/FunctionRule/AttributeRule/RegexRule） | Schema 验证 |
+
+**多 Agent 支持：**
+- 采用 **Agent-as-Object** 模式：子 Agent 作为 `Variable` 注入编排者的 Runtime
+- 编排者的 LLM 生成代码直接调用 `sub_agent.run()`
+- 各 Agent 维护独立 Runtime 状态
+
+**其他特性：**
+- 异步优先（`async/await`）
+- 流式事件：`'code'`（生成的代码）、`'execution_output'`（执行结果）、`'reasoning'`（推理过程）
+- 多模型：通过 LiteLLM 支持 100+ 模型
+- **注意：这是一个小众项目**，GitHub Stars 较少，社区活跃度有限
 
 ---
 
@@ -178,41 +195,42 @@ response = agent.run("What is the population of Tokyo divided by 2?")
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 工具定义方式 | 内置预定义工具集 | 装饰器 + 类型推断自动生成 Schema | Go 接口实现 | 装饰器/基类注册 |
-| 自定义工具 | 通过 MCP Server | 函数装饰器 / Pydantic 模型 | 不支持 | 函数装饰器 |
+| 工具定义方式 | 内置预定义工具集 | 装饰器 + 类型推断自动生成 Schema | Go 接口实现 | Function()/Variable()/Type() 注入 Runtime |
+| 调用机制 | JSON 工具调用 | JSON 工具调用 | JSON 工具调用 | **LLM 生成 Python 代码直接调用** |
+| 自定义工具 | 通过 MCP Server | 函数装饰器 / Pydantic 模型 | 不支持 | Function() 包装器 |
 | MCP 支持 | 原生支持 | 原生支持 | 不支持 | 不支持 |
-| 工具权限控制 | allowedTools/disallowedTools | 无内置（通过 Guardrails 间接实现） | 无 | 无 |
-| Agent-as-Tool | 子 Agent 进程 | 原生 Agent-as-Tool 原语 | 无 | 无 |
+| 工具权限控制 | allowedTools/disallowedTools | 无内置（通过 Guardrails 间接实现） | 无 | AST 规则验证 |
+| Agent-as-Tool | 子 Agent 进程 | 原生 Agent-as-Tool 原语 | 无 | Agent-as-Variable |
 | 托管工具 | 无 | WebSearch/FileSearch/CodeInterpreter 等 | 无 | 无 |
 
 ### 2. 多 Agent 编排
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 多 Agent 支持 | 子进程 Agent 树 | Handoff + Agent-as-Tool | 无 | 无 |
-| 编排模式 | 层级式（父-子） | 对等式（Handoff）+ 层级式（Agent-as-Tool） | N/A | N/A |
-| Agent 间通信 | 通过父 Agent 上下文 | 共享对话历史 + Context 对象 | N/A | N/A |
-| 并发执行 | 支持并行子 Agent | 顺序 Handoff（无并行） | N/A | N/A |
-| 动态路由 | 模型自主选择 | Handoff 声明 + 模型选择 | N/A | N/A |
+| 多 Agent 支持 | 子进程 Agent 树 | Handoff + Agent-as-Tool | 无 | Agent-as-Variable（代码生成调用） |
+| 编排模式 | 层级式（父-子） | 对等式（Handoff）+ 层级式（Agent-as-Tool） | N/A | 层级式（代码生成驱动） |
+| Agent 间通信 | 通过父 Agent 上下文 | 共享对话历史 + Context 对象 | N/A | 通过 Runtime 变量 |
+| 并发执行 | 支持并行子 Agent | 顺序 Handoff（无并行） | N/A | 取决于生成的代码 |
+| 动态路由 | 模型自主选择 | Handoff 声明 + 模型选择 | N/A | 代码逻辑决定 |
 
 ### 3. 执行模型
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 异步支持 | AsyncIterator 流式 | async/await (Runner.run) | Go goroutine | 同步为主 |
-| 同步支持 | 通过收集迭代器 | Runner.run_sync() | 原生同步 | 原生同步 |
-| 流式输出 | 原生事件流 | RunResultStreaming | 终端实时渲染 | 无 |
+| 异步支持 | AsyncIterator 流式 | async/await (Runner.run) | Go goroutine | async/await 优先 |
+| 同步支持 | 通过收集迭代器 | Runner.run_sync() | 原生同步 | 支持 |
+| 流式输出 | 原生事件流 | RunResultStreaming | 终端实时渲染 | stream_events (code/output/reasoning) |
 | 人机交互 | 工具权限审批 | interruptions 机制 | 终端交互 | 无 |
-| 上下文窗口管理 | 自动压缩 + 摘要 | 手动 (to_input_list) | Provider 依赖 | 无特殊处理 |
+| 上下文窗口管理 | 自动压缩 + 摘要 | 手动 (to_input_list) | Provider 依赖 | Skills 渐进式加载 |
 
 ### 4. 安全与沙箱
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 沙箱执行 | 内置沙箱（Bash 命令） | 无内置沙箱 | 无 | 无 |
-| 权限模型 | 精细工具权限 | Guardrails 三层防护 | 终端确认 | 无 |
-| 网络隔离 | 可配置 | 无 | 无 | 无 |
-| 输入验证 | 工具参数验证 | Input/Output/Tool Guardrails | 基础验证 | 基础验证 |
+| 沙箱执行 | 内置沙箱（Bash 命令） | 无内置沙箱 | 无 | AST 预执行验证 |
+| 权限模型 | 精细工具权限 | Guardrails 三层防护 | 终端确认 | ImportRule/FunctionRule/AttributeRule |
+| 网络隔离 | 可配置 | 无 | 无 | 通过 AST 规则限制 |
+| 输入验证 | 工具参数验证 | Input/Output/Tool Guardrails | 基础验证 | AST + RegexRule |
 
 ---
 
@@ -236,11 +254,11 @@ response = agent.run("What is the population of Tokyo divided by 2?")
 - **适合场景**：想用开源方案替代 Claude Code / Cursor 的开发者
 - **局限**：无法作为库集成，无编排能力，扩展性有限
 
-### PyAgent — "给你一个简单的起点"
-- **核心思想**：最小化的 Agent 框架，快速上手
-- **抽象层级最低**：简单的 ReAct 循环 + 工具注册
-- **适合场景**：学习 Agent 开发、原型验证、小规模应用
-- **局限**：功能有限，缺乏生产级特性（无流式、无安全、无多 Agent）
+### PyAgent — "给你一种新的工具调用范式"
+- **核心思想**：让 LLM 生成代码而非 JSON 来调用工具，减少往返次数，提高表达能力
+- **抽象层级独特**：不是"更简单"或"更复杂"，而是"不同的范式"——代码即工具调用
+- **适合场景**：需要复杂多步工具编排（循环、条件）、对 Python 运行时状态有需求的场景
+- **局限**：小众项目，社区有限；代码生成的安全性依赖 AST 验证的完备性
 
 ---
 
@@ -251,7 +269,7 @@ response = agent.run("What is the population of Tokyo divided by 2?")
 | 自动化编程 / CI 集成 | Claude Agent SDK | 开箱即用的编程 Agent，工具权限精细控制 |
 | 多 Agent 业务系统 | OpenAI Agent SDK | 成熟的多 Agent 编排原语（Handoff/Guardrails） |
 | 开源终端编程助手 | OpenCode | 多模型支持，无供应商锁定 |
-| 学习/教学/原型 | PyAgent | 代码简单，容易理解和修改 |
+| 复杂多步工具编排 | PyAgent | 代码生成式调用，一次生成可完成多步操作 |
 | 需要多模型 Agent 框架 | OpenAI Agent SDK | LiteLLM 集成支持 100+ 模型 |
 | 需要严格安全控制 | Claude Agent SDK | 内置沙箱 + 工具权限模型 |
 
@@ -264,7 +282,7 @@ response = agent.run("What is the population of Tokyo divided by 2?")
 1. **Claude Agent SDK** 是**最高层抽象**——它封装了一个完整的、已经过大量优化的编程 Agent，开发者获得的是"能力"而非"组件"
 2. **OpenAI Agent SDK** 是**中间层框架**——它提供构建 Agent 的原语和编排能力，开发者获得的是"灵活性"
 3. **OpenCode** 是**应用层产品**——它是一个可以直接使用的终端编程工具，开发者获得的是"工具"
-4. **PyAgent** 是**基础层示例**——它展示了 Agent 的基本模式，适合学习和小规模使用
+4. **PyAgent** 是**范式创新者**——它用"LLM 生成代码"替代"JSON 工具调用"，在减少往返次数和提高表达能力方面有独到之处，但仍是小众项目
 
 从系统架构角度看，最核心的差异在于 **"封装 vs 开放"的权衡**：
 - Claude Agent SDK 选择了高度封装，以牺牲灵活性换取开箱即用的强大能力
