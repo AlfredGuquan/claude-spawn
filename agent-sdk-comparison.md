@@ -21,44 +21,68 @@
 
 ### 1. Claude Agent SDK
 
-**架构模式：进程级 Agent 编排**
+**架构模式：单线程主循环 + OS 级沙箱**
 
-Claude Agent SDK 的核心设计理念是**将 Claude Code 本身作为一个可编程的子进程**来调用。它不是传统意义上的"框架"，而是一个 SDK 接口层，封装了对 Claude Code CLI 的调用。
+Claude Agent SDK（2025 年 9 月由 Claude Code SDK 更名）将 Claude Code 的生产运行时暴露为可编程库。其核心是一个**单线程主循环**（内部代号 "nO"），刻意避免了多线程对话或多 Agent 人格竞争。
 
 ```typescript
-// TypeScript SDK
-import { claude } from "@anthropic-ai/claude-code-sdk";
+// TypeScript SDK (@anthropic-ai/claude-agent-sdk)
+import { query } from "@anthropic-ai/claude-agent-sdk";
 
-const conversation = claude({
+const conversation = query({
   prompt: "Fix the bug in auth.ts",
   options: {
     maxTurns: 10,
     allowedTools: ["Read", "Edit", "Bash"],
-    systemPrompt: "You are a senior engineer."
+    systemPrompt: "You are a senior engineer.",
+    permissionMode: "default"  // plan | default | acceptEdits | bypassPermissions
   }
 });
 
-for await (const event of conversation) {
-  if (event.type === "assistant") {
-    console.log(event.message);
+for await (const message of conversation) {
+  // 5 种消息类型：SystemMessage, AssistantMessage, UserMessage, StreamEvent, ResultMessage
+  if (message.type === "assistant") {
+    console.log(message.content);
   }
 }
 ```
 
-**Agent Loop（核心循环）：**
-1. 用户 prompt 发送给 Claude 模型
-2. 模型返回文本 + 工具调用请求
-3. SDK 在受控环境中执行工具（文件读写、Bash 命令、搜索等）
-4. 工具结果反馈给模型
-5. 重复直到模型不再请求工具调用，或达到 `maxTurns` 上限
+**Agent Loop（单线程主循环）：**
+1. 接收 prompt → 产出 `SystemMessage`（subtype: `"init"`）
+2. Claude 返回文本/工具调用 → 产出 `AssistantMessage`
+3. SDK 执行工具、收集结果 → 产出 `UserMessage`（含工具结果）
+   - **只读工具**（Read/Glob/Grep）→ **并发**执行
+   - **写入工具**（Edit/Write/Bash）→ **顺序**执行，避免冲突
+4. 重复 2-3 直到纯文本响应（无工具调用）
+5. 返回 `ResultMessage`（含最终文本、token 用量、费用、session ID）
 
-**关键特性：**
-- **子 Agent 模式**：可以在 Agent 内部启动新的 Agent 子进程（通过 `Agent` tool），实现任务分解和并行处理
-- **流式输出**：基于 AsyncIterator 的事件流，实时获取 Agent 行为
-- **工具权限控制**：通过 `allowedTools` / `disallowedTools` 精细控制 Agent 可用工具
-- **沙箱执行**：Bash 命令在沙箱中运行，限制网络访问和文件系统操作
-- **MCP 集成**：支持 Model Context Protocol 服务器作为工具源
-- **Hooks 系统**：在工具调用前后注入自定义逻辑
+**实时转向机制**（内部代号 "h2A"）：异步双缓冲队列，允许在任务执行中通过流式用户输入进行方向修正，无需完全重启。
+
+**子 Agent 系统：**
+- 每个子 Agent 获得**全新上下文窗口**（不继承父对话历史）
+- 父→子唯一数据通道是任务 prompt 字符串
+- 只有子 Agent 的**最终响应**返回给父 Agent（中间工具调用保持内部）
+- **不支持递归**：子 Agent 不能再创建子 Agent
+- 多个子 Agent 可以**并发**运行
+- 实验性 **Agent Teams** 功能：多会话协作，队友可直接通信
+
+**OS 级沙箱**（核心差异化）：
+- **Linux**：bubblewrap（内核级文件系统隔离）
+- **macOS**：Seatbelt（沙箱配置文件）
+- 可配置：`allowedDomains`、`denyRead`/`denyWrite`、`allowLocalBinding` 等
+- Anthropic 数据：减少 84% 权限弹窗，降低 95% 可利用的 prompt 注入攻击面
+
+**四级权限模式**：`plan`（只读）> `default`（询问）> `acceptEdits`（自动批准编辑）> `bypassPermissions`（无提示，仅限隔离环境）
+
+**Hooks 生命周期**：`PreToolUse`、`PostToolUse`、`Stop`、`PreCompact`、`SubagentStart/Stop` —— 在应用进程中运行，不消耗上下文窗口
+
+**上下文管理：**
+- 上下文窗口不在 turn 间重置，所有内容累积
+- **自动压缩**：接近窗口限制时自动摘要历史，发出 `compact_boundary` 事件
+- **Session 机制**：支持 resume（恢复）和 fork（分叉）模式
+- **Memory 工具**：跨对话持久化关键信息
+
+**模型支持**：Claude 专属，但支持多托管方：Anthropic API / Amazon Bedrock / Google Vertex AI / Azure AI Foundry
 
 ---
 
@@ -227,10 +251,10 @@ response = await agent.run("What is the population of Tokyo divided by 2?")
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 沙箱执行 | 内置沙箱（Bash 命令） | 无内置沙箱 | 无 | AST 预执行验证 |
-| 权限模型 | 精细工具权限 | Guardrails 三层防护 | 终端确认 | ImportRule/FunctionRule/AttributeRule |
-| 网络隔离 | 可配置 | 无 | 无 | 通过 AST 规则限制 |
-| 输入验证 | 工具参数验证 | Input/Output/Tool Guardrails | 基础验证 | AST + RegexRule |
+| 沙箱执行 | OS 级沙箱（bubblewrap/Seatbelt） | 无内置沙箱 | 无 | AST 预执行验证 |
+| 权限模型 | 四级权限（plan/default/acceptEdits/bypass） | Guardrails 三层防护 | 终端确认 | ImportRule/FunctionRule/AttributeRule |
+| 网络隔离 | 内核级（allowedDomains 配置） | 无 | 无 | 通过 AST 规则限制 |
+| 输入验证 | 工具参数验证 + Hooks 拦截 | Input/Output/Tool Guardrails | 基础验证 | AST + RegexRule |
 
 ---
 
@@ -288,4 +312,4 @@ response = await agent.run("What is the population of Tokyo divided by 2?")
 - Claude Agent SDK 选择了高度封装，以牺牲灵活性换取开箱即用的强大能力
 - OpenAI Agent SDK 选择了适度开放，提供足够的原语让开发者构建多样化的 Agent 系统
 - OpenCode 选择了完全开放源代码但封闭使用方式（应用而非库）
-- PyAgent 选择了完全开放但功能有限
+- PyAgent 选择了范式创新（代码生成替代 JSON 调用），但生态有限
