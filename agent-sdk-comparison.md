@@ -8,12 +8,12 @@
 
 | 维度 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 开发者 | Anthropic | OpenAI | sst (开源社区) | acodercat (开源社区) |
-| 语言支持 | TypeScript/Python | Python / TypeScript | Go (Golang) | Python |
-| 定位 | 编程 Agent 基础设施 | 通用 Agent 编排框架 | 终端 AI 编程助手 | 工具增强型 Agent 框架 |
-| 模型绑定 | Claude 专属 | 默认 OpenAI，支持多模型 | 多模型 (Claude/OpenAI/Gemini 等) | 多模型 (通过 LLM 抽象层) |
-| 开源状态 | SDK 开源，核心 Agent 闭源 | 完全开源 | 完全开源 | 完全开源 |
-| GitHub Stars | ~30k+ (Claude Code) | ~20k+ | ~5k+ | ~500+ |
+| 开发者 | Anthropic | OpenAI | SST/Anomaly (开源社区) | acodercat (开源社区) |
+| 语言支持 | TypeScript/Python | Python / TypeScript | TypeScript (Bun) + Go/Python SDK | Python |
+| 定位 | 编程 Agent 基础设施 | 通用 Agent 编排框架 | 开源 AI 编程 Agent + SDK | 代码生成式工具调用框架 |
+| 模型绑定 | Claude 专属（多托管方） | 默认 OpenAI，支持多模型 | 多模型 (Vercel AI SDK) | 多模型 (通过 LiteLLM) |
+| 开源状态 | SDK 开源，核心 Agent 闭源 | 完全开源 | 完全开源 (MIT) | 完全开源 |
+| GitHub Stars | ~30k+ (Claude Code) | ~20k+ | ~119k | 较少 |
 
 ---
 
@@ -130,36 +130,56 @@ print(result.final_output)
 
 ### 3. OpenCode
 
-**架构模式：终端原生 AI 编程 Agent**
+**架构模式：客户端/服务器 AI 编程 Agent**
 
-OpenCode 是一个用 Go 编写的开源终端 AI 编程助手，定位类似于 Claude Code 的开源替代品。它是一个完整的应用程序而非 SDK 框架。
+OpenCode（anomalyco/opencode，~119k GitHub Stars）是目前最大的开源 AI 编程 Agent 项目，MIT 许可证。它采用**客户端/服务器分离架构**，不仅是终端工具，还提供了 SDK 供编程集成。
 
-```bash
-# 安装和使用
-go install github.com/sst/opencode@latest
-opencode
+> 注：原始的 Go 版本（opencode-ai/opencode，基于 Bubble Tea）已于 2025 年 9 月归档。当前活跃版本由 SST/Anomaly 团队用 TypeScript 重写。
 
-# 在终端中直接与 AI 对话进行编程
-> Fix the null pointer exception in handler.go
+```typescript
+// 作为 SDK 使用
+import { opencode } from "@opencode/sdk";
+
+const session = await opencode.session.create({ agent: "build" });
+const result = await opencode.session.chat(session.id, {
+  content: "Fix the null pointer exception in handler.go"
+});
 ```
 
-**架构特点：**
-- **TUI 应用**：基于 BubbleTea（Go 的终端 UI 框架）构建的交互式终端界面
-- **Provider 抽象层**：统一适配 Anthropic、OpenAI、Google Gemini、AWS Bedrock、OpenRouter 等多种模型
-- **LSP 集成**：与语言服务器协议集成，提供代码智能感知
-- **会话管理**：基于 SQLite 的本地会话持久化
-- **文件监控**：实时监控项目文件变化
+**客户端/服务器架构：**
+- **后端**：TypeScript + **Bun 运行时**，通过 **Hono** 框架暴露 HTTP API（默认端口 4096）
+- **前端**：**SolidJS** + `@opentui/solid` 的终端 UI，通过 HTTP + **SSE（Server-Sent Events）** 与后端通信
+- **任意客户端**：因为是 HTTP API，TUI 只是一种前端；还有 VS Code 扩展、桌面应用、移动端等
+- **持久化**：SQLite 存储会话，Git-based 快照用于文件状态恢复
 
-**工具系统：**
-- 内置工具集：文件读写、Bash 执行、Glob 搜索、Grep 搜索、LSP 诊断等
-- 工具定义为 Go 接口，不支持用户自定义扩展工具（区别于 SDK 框架）
-- 无 MCP 支持（截至最新版本）
+**Agentic Loop（"万亿美元循环"）：**
+1. 组装系统 prompt + 对话历史 + 工具定义
+2. 调用 Vercel AI SDK 的 `streamText`（启用多步工具调用）
+3. 流式处理事件：`tool-call`、`tool-result`、`text-delta`、`start-step`、`finish-step`
+4. 每条消息写入 SQLite 并通过事件总线广播
+5. 终止条件：模型无工具调用 / 达到步数限制 / 用户拒绝权限请求
+
+**工具系统（13 个内置工具）：**
+- Bash（tree-sitter AST 解析命令安全性）、Edit（文件新鲜度校验）、Read（50KB 上限）、Write、Grep、Glob、List、WebFetch、WebSearch、CodeSearch、Task、Skill、TodoWrite
+- **MCP 支持**：启动时连接 MCP 服务器，工具与内置工具统一暴露
+- **插件系统**：JS/TS 插件可注入自定义工具、修改工具参数/输出（生命周期钩子：`tool.execute.before`、`tool.execute.after` 等）
+- **权限门控**：`allow` / `deny` / `ask` 三态，glob 模式匹配，声明序优先
+
+**两级 Agent 层次：**
+- **主 Agent**：Build（全工具访问）、Plan（只读）
+- **子 Agent**：General（多步研究）、Explore（快速只读浏览）
+- **系统 Agent**：压缩 Agent、标题 Agent、摘要 Agent
+- **自定义 Agent**：通过 JSON 配置或 Markdown 文件定义，指定模型、温度、工具限制
+
+**LSP 集成**：编辑后自动获取编译器/linter 诊断结果反馈给 LLM，形成闭环
+
+**多模型支持**（通过 Vercel AI SDK）：Claude、GPT-4、Gemini、Bedrock、Azure、Groq、OpenRouter、GitHub Copilot、任何 OpenAI 兼容端点
 
 **关键差异点：**
-- 这是一个**应用**而非**框架**：用户直接使用，不用于构建其他 Agent
-- Go 语言实现，启动快，内存占用低
-- 多模型支持是核心设计目标
-- 无多 Agent / 子 Agent 机制
+- **既是应用也提供 SDK**：有 TypeScript/Go/Python SDK
+- 客户端/服务器分离：可远程驱动
+- Git-based 快照（独立 git 目录，不影响用户 git 历史）
+- 插件系统和 MCP 支持提供了强扩展性
 
 ---
 
@@ -219,42 +239,43 @@ response = await agent.run("What is the population of Tokyo divided by 2?")
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 工具定义方式 | 内置预定义工具集 | 装饰器 + 类型推断自动生成 Schema | Go 接口实现 | Function()/Variable()/Type() 注入 Runtime |
+| 工具定义方式 | 内置预定义工具集 | 装饰器 + 类型推断自动生成 Schema | Tool.define + Zod Schema | Function()/Variable()/Type() 注入 Runtime |
 | 调用机制 | JSON 工具调用 | JSON 工具调用 | JSON 工具调用 | **LLM 生成 Python 代码直接调用** |
-| 自定义工具 | 通过 MCP Server | 函数装饰器 / Pydantic 模型 | 不支持 | Function() 包装器 |
-| MCP 支持 | 原生支持 | 原生支持 | 不支持 | 不支持 |
-| 工具权限控制 | allowedTools/disallowedTools | 无内置（通过 Guardrails 间接实现） | 无 | AST 规则验证 |
-| Agent-as-Tool | 子 Agent 进程 | 原生 Agent-as-Tool 原语 | 无 | Agent-as-Variable |
+| 自定义工具 | 通过 MCP Server | 函数装饰器 / Pydantic 模型 | MCP Server + 插件系统 | Function() 包装器 |
+| MCP 支持 | 原生支持 | 原生支持 | 原生支持 | 不支持 |
+| 工具权限控制 | allowedTools/disallowedTools | 无内置（通过 Guardrails 间接实现） | allow/deny/ask 三态 + glob 模式 | AST 规则验证 |
+| Agent-as-Tool | 子 Agent 进程 | 原生 Agent-as-Tool 原语 | TaskTool → 子会话 | Agent-as-Variable |
 | 托管工具 | 无 | WebSearch/FileSearch/CodeInterpreter 等 | 无 | 无 |
 
 ### 2. 多 Agent 编排
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 多 Agent 支持 | 子进程 Agent 树 | Handoff + Agent-as-Tool | 无 | Agent-as-Variable（代码生成调用） |
-| 编排模式 | 层级式（父-子） | 对等式（Handoff）+ 层级式（Agent-as-Tool） | N/A | 层级式（代码生成驱动） |
-| Agent 间通信 | 通过父 Agent 上下文 | 共享对话历史 + Context 对象 | N/A | 通过 Runtime 变量 |
-| 并发执行 | 支持并行子 Agent | 顺序 Handoff（无并行） | N/A | 取决于生成的代码 |
-| 动态路由 | 模型自主选择 | Handoff 声明 + 模型选择 | N/A | 代码逻辑决定 |
+| 多 Agent 支持 | 子进程 Agent 树 | Handoff + Agent-as-Tool | 两级 Agent 层次（主+子） | Agent-as-Variable（代码生成调用） |
+| 编排模式 | 层级式（父-子） | 对等式（Handoff）+ 层级式（Agent-as-Tool） | 层级式（Build/Plan → General/Explore） | 层级式（代码生成驱动） |
+| Agent 间通信 | 通过父 Agent 上下文 | 共享对话历史 + Context 对象 | TaskTool → 子会话（独立上下文） | 通过 Runtime 变量 |
+| 并发执行 | 支持并行子 Agent | 顺序 Handoff（无并行） | 子任务独立执行 | 取决于生成的代码 |
+| 动态路由 | 模型自主选择 | Handoff 声明 + 模型选择 | 模型选择子 Agent 类型 | 代码逻辑决定 |
 
 ### 3. 执行模型
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 异步支持 | AsyncIterator 流式 | async/await (Runner.run) | Go goroutine | async/await 优先 |
-| 同步支持 | 通过收集迭代器 | Runner.run_sync() | 原生同步 | 支持 |
-| 流式输出 | 原生事件流 | RunResultStreaming | 终端实时渲染 | stream_events (code/output/reasoning) |
-| 人机交互 | 工具权限审批 | interruptions 机制 | 终端交互 | 无 |
-| 上下文窗口管理 | 自动压缩 + 摘要 | 手动 (to_input_list) | Provider 依赖 | Skills 渐进式加载 |
+| 异步支持 | AsyncIterator 流式 | async/await (Runner.run) | SSE 事件流 (Bun) | async/await 优先 |
+| 同步支持 | 通过收集迭代器 | Runner.run_sync() | HTTP API 同步调用 | 支持 |
+| 流式输出 | 原生事件流 | RunResultStreaming | SSE + 事件总线广播 | stream_events (code/output/reasoning) |
+| 人机交互 | 工具权限审批 | interruptions 机制 | SSE 权限挂起/恢复 | 无 |
+| 上下文窗口管理 | 自动压缩 + 摘要 | 手动 (to_input_list) | 压缩 Agent 自动摘要 (~90% 阈值) | Skills 渐进式加载 |
 
 ### 4. 安全与沙箱
 
 | 特性 | Claude Agent SDK | OpenAI Agent SDK | OpenCode | PyAgent |
 |------|-----------------|------------------|----------|---------|
-| 沙箱执行 | OS 级沙箱（bubblewrap/Seatbelt） | 无内置沙箱 | 无 | AST 预执行验证 |
-| 权限模型 | 四级权限（plan/default/acceptEdits/bypass） | Guardrails 三层防护 | 终端确认 | ImportRule/FunctionRule/AttributeRule |
-| 网络隔离 | 内核级（allowedDomains 配置） | 无 | 无 | 通过 AST 规则限制 |
-| 输入验证 | 工具参数验证 + Hooks 拦截 | Input/Output/Tool Guardrails | 基础验证 | AST + RegexRule |
+| 沙箱执行 | OS 级沙箱（bubblewrap/Seatbelt） | 无内置沙箱 | tree-sitter AST 解析 Bash 命令 | AST 预执行验证 |
+| 权限模型 | 四级权限（plan/default/acceptEdits/bypass） | Guardrails 三层防护 | allow/deny/ask + glob 规则 | ImportRule/FunctionRule/AttributeRule |
+| 网络隔离 | 内核级（allowedDomains 配置） | 无 | 路径越界检测 | 通过 AST 规则限制 |
+| 输入验证 | 工具参数验证 + Hooks 拦截 | Input/Output/Tool Guardrails | Zod Schema + 文件新鲜度校验 | AST + RegexRule |
+| 状态恢复 | Session resume/fork | RunState 序列化 | Git-based 快照（独立 git 目录） | 无 |
 
 ---
 
@@ -272,11 +293,11 @@ response = await agent.run("What is the population of Tokyo divided by 2?")
 - **适合场景**：客服系统、多步骤工作流、复杂业务 Agent
 - **局限**：需要更多工程投入，Agent 能力取决于开发者的 prompt 和工具设计
 
-### OpenCode — "给你一个开源的 Claude Code"
-- **核心思想**：提供完整的终端 AI 编程体验，不绑定特定模型
-- **不是 SDK**：它是最终用户产品，不是开发者工具
-- **适合场景**：想用开源方案替代 Claude Code / Cursor 的开发者
-- **局限**：无法作为库集成，无编排能力，扩展性有限
+### OpenCode — "给你一个开源的、可编程的 Claude Code"
+- **核心思想**：完全开源（MIT）的 AI 编程 Agent，客户端/服务器分离，不绑定模型
+- **既是应用也是 SDK**：TUI 直接用，也可通过 HTTP API / TypeScript/Go/Python SDK 编程集成
+- **适合场景**：需要开源方案、多模型支持、可扩展（插件+MCP）的编程 Agent
+- **局限**：Agent 编排不如 OpenAI SDK 灵活（无 Handoff 原语），安全性不如 Claude SDK（无 OS 级沙箱）
 
 ### PyAgent — "给你一种新的工具调用范式"
 - **核心思想**：让 LLM 生成代码而非 JSON 来调用工具，减少往返次数，提高表达能力
@@ -292,7 +313,7 @@ response = await agent.run("What is the population of Tokyo divided by 2?")
 |----------|---------|------|
 | 自动化编程 / CI 集成 | Claude Agent SDK | 开箱即用的编程 Agent，工具权限精细控制 |
 | 多 Agent 业务系统 | OpenAI Agent SDK | 成熟的多 Agent 编排原语（Handoff/Guardrails） |
-| 开源终端编程助手 | OpenCode | 多模型支持，无供应商锁定 |
+| 开源可编程编程 Agent | OpenCode | MIT 许可、多模型、插件系统、MCP、SDK 集成 |
 | 复杂多步工具编排 | PyAgent | 代码生成式调用，一次生成可完成多步操作 |
 | 需要多模型 Agent 框架 | OpenAI Agent SDK | LiteLLM 集成支持 100+ 模型 |
 | 需要严格安全控制 | Claude Agent SDK | 内置沙箱 + 工具权限模型 |
@@ -305,11 +326,11 @@ response = await agent.run("What is the population of Tokyo divided by 2?")
 
 1. **Claude Agent SDK** 是**最高层抽象**——它封装了一个完整的、已经过大量优化的编程 Agent，开发者获得的是"能力"而非"组件"
 2. **OpenAI Agent SDK** 是**中间层框架**——它提供构建 Agent 的原语和编排能力，开发者获得的是"灵活性"
-3. **OpenCode** 是**应用层产品**——它是一个可以直接使用的终端编程工具，开发者获得的是"工具"
+3. **OpenCode** 是**全栈开源方案**——既是可直接使用的编程工具，也是可编程集成的 SDK，119k stars 证明了其生态影响力
 4. **PyAgent** 是**范式创新者**——它用"LLM 生成代码"替代"JSON 工具调用"，在减少往返次数和提高表达能力方面有独到之处，但仍是小众项目
 
 从系统架构角度看，最核心的差异在于 **"封装 vs 开放"的权衡**：
 - Claude Agent SDK 选择了高度封装，以牺牲灵活性换取开箱即用的强大能力
 - OpenAI Agent SDK 选择了适度开放，提供足够的原语让开发者构建多样化的 Agent 系统
-- OpenCode 选择了完全开放源代码但封闭使用方式（应用而非库）
+- OpenCode 选择了完全开放（MIT），同时提供应用和 SDK，客户端/服务器分离实现最大灵活性
 - PyAgent 选择了范式创新（代码生成替代 JSON 调用），但生态有限
